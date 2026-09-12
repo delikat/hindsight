@@ -412,14 +412,12 @@ async def test_call_falls_back_to_uncached_when_cache_403s():
     llm._client.aio.models = MagicMock()
     llm._client.aio.models.generate_content = AsyncMock(side_effect=_gen)
 
-    result = (
-        await llm.call(
-            messages=[{"role": "system", "content": "SYSTEM PREFIX"}, {"role": "user", "content": "doc"}],
-            cached_prefix="cachedContents/stale",
-            max_retries=2,
-            temperature=0.1,
-        )
-    ).content
+    result = await llm.call(
+        messages=[{"role": "system", "content": "SYSTEM PREFIX"}, {"role": "user", "content": "doc"}],
+        cached_prefix="cachedContents/stale",
+        max_retries=2,
+        temperature=0.1,
+    )
 
     # The request succeeded via the uncached retry.
     assert result == "extracted"
