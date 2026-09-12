@@ -68,7 +68,7 @@ _DEFAULT_INCREMENTAL_TTL_SECONDS = 5 * 60
 @dataclass
 class _CacheEntry:
     name: str  # The CachedContent resource name returned by Gemini.
-    created_at: float
+    created_at: float  # Wall-clock (time.time()) — see _is_fresh for why.
     ttl_seconds: int
 
 
@@ -217,15 +217,23 @@ class GeminiCacheManager:
 
             self._entries[key] = _CacheEntry(
                 name=cache_name,
-                created_at=time.monotonic(),
+                created_at=time.time(),
                 ttl_seconds=self._ttl_seconds,
             )
             return cache_name
 
     def _is_fresh(self, entry: _CacheEntry) -> bool:
         """An entry is fresh if it's young enough that the next request
-        won't race against the TTL expiry."""
-        age = time.monotonic() - entry.created_at
+        won't race against the TTL expiry.
+
+        Wall-clock time, NOT time.monotonic(): Google expires the
+        CachedContent on its own wall clock, and CLOCK_MONOTONIC does not
+        advance while the host (or the VM this runs in) sleeps. Measured
+        with a monotonic age, an entry can look fresh long after the
+        server-side TTL lapsed and get re-served dead. Ordinary NTP
+        adjustments are far smaller than the refresh margin.
+        """
+        age = time.time() - entry.created_at
         return age < (entry.ttl_seconds - self._refresh_margin_seconds)
 
     def invalidate(self, name: str) -> None:

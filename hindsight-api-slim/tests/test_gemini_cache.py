@@ -204,7 +204,7 @@ async def test_refreshes_after_ttl_margin(monkeypatch):
 
     fake_now = {"t": 1000.0}
     monkeypatch.setattr(
-        "hindsight_api.engine.providers.gemini_cache.time.monotonic",
+        "hindsight_api.engine.providers.gemini_cache.time.time",
         lambda: fake_now["t"],
     )
 
@@ -313,7 +313,7 @@ async def test_call_falls_back_to_uncached_when_cache_400s():
 
     # Seed a cache manager entry that maps to the (now invalid) cache name.
     mgr = GeminiCacheManager(client=MagicMock())
-    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.monotonic(), ttl_seconds=3300)
+    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.time(), ttl_seconds=3300)
     llm._cache_manager = mgr
 
     captured = []
@@ -381,7 +381,7 @@ async def test_call_falls_back_to_uncached_when_cache_403s():
 
     # Seed a cache manager entry that maps to the (now expired) cache name.
     mgr = GeminiCacheManager(client=MagicMock())
-    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.monotonic(), ttl_seconds=3300)
+    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.time(), ttl_seconds=3300)
     llm._cache_manager = mgr
 
     captured = []
@@ -453,7 +453,7 @@ async def test_call_with_tools_falls_back_to_uncached_when_cache_403s():
     )
 
     mgr = GeminiCacheManager(client=MagicMock())
-    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.monotonic(), ttl_seconds=3300)
+    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.time(), ttl_seconds=3300)
     llm._cache_manager = mgr
 
     captured_configs = []
