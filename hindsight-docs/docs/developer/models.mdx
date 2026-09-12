@@ -197,6 +197,9 @@ export HINDSIGHT_API_LLM_REASONING_EFFORT=high   # sent alongside tools, unlike 
 export HINDSIGHT_API_LLM_PROVIDER=gemini
 export HINDSIGHT_API_LLM_API_KEY=xxxxxxxxxxxx
 export HINDSIGHT_API_LLM_MODEL=gemini-3.5-flash
+# Optional on Gemini 3+: becomes the request's thinking_level (low/medium/high;
+# none → MINIMAL where the model allows it). Unset = the model's own default.
+# export HINDSIGHT_API_LLM_REASONING_EFFORT=low
 
 # Anthropic
 export HINDSIGHT_API_LLM_PROVIDER=anthropic
