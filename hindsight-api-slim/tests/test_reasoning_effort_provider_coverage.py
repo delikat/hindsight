@@ -11,8 +11,10 @@ Two outcomes are acceptable, and nothing else:
     it per target provider (Anthropic thinking budgets, Gemini thinking config, OpenAI's
     flat parameter). `litellm.drop_params = True` discards it for models with no
     reasoning knob rather than raising.
-  * **reported** — providers with no reasoning control at all (Gemini and Anthropic
-    native SDKs, Claude Code) log a WARNING at startup naming the ignored value.
+  * **reported** — providers with no reasoning control at all (Anthropic's native SDK,
+    Claude Code, and Gemini's pre-3 generations, which have no ``thinking_level``) log a
+    WARNING at startup naming the ignored value. Gemini 3+ is in the honoured group
+    (see test_gemini_thinking_level.py).
 """
 
 import logging
@@ -69,7 +71,9 @@ class TestLiteLLMForwardsTheSetting:
 class TestProvidersWithoutReasoningControlSaySo:
     """These providers cannot act on the setting; they must not swallow it in silence."""
 
-    def test_gemini_warns(self, caplog):
+    def test_gemini_pre_3_warns(self, caplog):
+        # Gemini 2.x takes an integer thinking_budget, not a level, so the effort has
+        # nowhere to go there. Gemini 3+ maps it to thinking_level and does not warn.
         from hindsight_api.engine.providers.gemini_llm import GeminiLLM
 
         with caplog.at_level(logging.WARNING):

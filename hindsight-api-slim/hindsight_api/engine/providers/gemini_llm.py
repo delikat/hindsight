@@ -255,6 +255,46 @@ _TIMEOUT_RETRIES = 2
 
 _DEFAULT_GEMINI_TIMEOUT = 90.0
 
+# ``HINDSIGHT_API_*_REASONING_EFFORT`` → Gemini 3 ``thinking_level``. Gemini 3
+# has four discrete levels and no "off": ``none`` is the closest the API offers
+# (``MINIMAL``), and ``xhigh`` clamps to ``HIGH``. Keys are the vocabulary the
+# other lanes accept, so one env value steers every provider.
+_THINKING_LEVELS: dict[str, str] = {
+    "none": "MINIMAL",
+    "minimal": "MINIMAL",
+    "low": "LOW",
+    "medium": "MEDIUM",
+    "high": "HIGH",
+    "xhigh": "HIGH",
+}
+
+# ``thinking_level`` exists from Gemini 3 onwards; the 1.x/2.x generations take an
+# integer ``thinking_budget`` instead and reject the level with a 400. Google's own
+# first-party model ids are authoritative here (unlike an OpenAI-compatible
+# endpoint, which can serve anything under any name), so gating on the name is
+# the honest check. Matches both ``gemini-2.5-flash`` and Vertex's
+# ``google/gemini-2.5-flash``.
+_LEGACY_GEMINI_RE = re.compile(r"(?:^|/)gemini-[12]\.")
+
+
+def _thinking_level_for(model: str, reasoning_effort: str | None) -> str | None:
+    """Resolve the ``thinking_level`` a configured effort maps to on ``model``.
+
+    ``None`` means "send nothing" — either nothing was configured (the model runs
+    at its own default level, ``MEDIUM`` on the 3.x Flash line) or the model
+    predates the parameter. An effort outside the shared vocabulary is a
+    configuration error and fails at startup rather than as a 400 on every call.
+    """
+    if reasoning_effort is None or _LEGACY_GEMINI_RE.search(model):
+        return None
+    try:
+        return _THINKING_LEVELS[reasoning_effort.lower()]
+    except KeyError:
+        raise ValueError(
+            f"reasoning_effort={reasoning_effort!r} is not a Gemini thinking level; "
+            f"use one of {', '.join(_THINKING_LEVELS)}"
+        ) from None
+
 
 class GeminiLLM(LLMInterface):
     """
@@ -276,7 +316,12 @@ class GeminiLLM(LLMInterface):
     ):
         """Initialize Gemini/VertexAI LLM provider."""
         super().__init__(provider, api_key, base_url, model, reasoning_effort, **kwargs)
-        self._warn_reasoning_effort_unsupported()
+        # Gemini 3+ honours the effort as ``thinking_level`` on every call (both
+        # the plain and the tool-calling path). Only the pre-3 generations, which
+        # have no level parameter, still discard it — and say so, as before.
+        self._thinking_level: str | None = _thinking_level_for(model, self.reasoning_effort)
+        if self.reasoning_effort is not None and self._thinking_level is None:
+            self._warn_reasoning_effort_unsupported()
 
         self._client = None
         self._is_vertexai = self.provider == "vertexai"
@@ -318,7 +363,18 @@ class GeminiLLM(LLMInterface):
             raise ValueError("Gemini provider requires api_key")
 
         self._client = genai.Client(api_key=self.api_key)
-        logger.info(f"Gemini API: model={self.model}")
+        logger.info(f"Gemini API: model={self.model}, {self._thinking_summary()}")
+
+    def _thinking_summary(self) -> str:
+        if self._thinking_level is None:
+            return "thinking_level=not sent (model default)"
+        return f"thinking_level={self._thinking_level} (reasoning_effort={self.reasoning_effort})"
+
+    def _apply_thinking_level(self, config_kwargs: dict[str, Any]) -> None:
+        """Attach the resolved ``thinking_level``; an explicit extra-body config wins."""
+        if self._thinking_level is None or "thinking_config" in config_kwargs:
+            return
+        config_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_level=self._thinking_level)
 
     def _apply_service_tier(self, config_kwargs: dict[str, Any]) -> None:
         if not self._service_tier:
@@ -379,7 +435,10 @@ class GeminiLLM(LLMInterface):
 
         self._client = genai.Client(**client_kwargs)
 
-        logger.info(f"Vertex AI: project={project_id}, region={region}, model={self.model}, auth={auth_method}")
+        logger.info(
+            f"Vertex AI: project={project_id}, region={region}, model={self.model}, auth={auth_method}, "
+            f"{self._thinking_summary()}"
+        )
 
     async def verify_connection(self) -> None:
         """
@@ -492,6 +551,7 @@ class GeminiLLM(LLMInterface):
             # Seed with user-configured extra params; explicit settings below win.
             config_kwargs: dict[str, Any] = dict(self._extra_body)
             self._apply_service_tier(config_kwargs)
+            self._apply_thinking_level(config_kwargs)
             if use_cache:
                 config_kwargs["cached_content"] = cached_prefix
             elif (
@@ -891,6 +951,7 @@ class GeminiLLM(LLMInterface):
             # Seed with user-configured extra params; explicit settings below win.
             config_kwargs: dict[str, Any] = dict(self._extra_body)
             self._apply_service_tier(config_kwargs)
+            self._apply_thinking_level(config_kwargs)
             if use_cache:
                 config_kwargs["cached_content"] = cached_prefix
             else:
