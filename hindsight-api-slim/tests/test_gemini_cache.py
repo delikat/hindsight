@@ -358,6 +358,172 @@ async def test_call_falls_back_to_uncached_when_cache_400s():
 
 
 @pytest.mark.asyncio
+async def test_call_falls_back_to_uncached_when_cache_403s():
+    """Gemini reports an expired/deleted CachedContent as a 403 PERMISSION_DENIED
+    ("CachedContent not found (or permission denied)"), not only as a 400. The
+    provider must treat a cached-call 403 as a stale cache — invalidate the entry
+    and retry uncached — rather than fast-failing it as an auth error, which
+    would send every retry back into the same dead cache name."""
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from google.genai import errors as genai_errors
+
+    from hindsight_api.engine.providers.gemini_cache import GeminiCacheManager, _CacheEntry
+    from hindsight_api.engine.providers.gemini_llm import GeminiLLM
+
+    llm = GeminiLLM(
+        provider="gemini", api_key="not-real-key", base_url="", model="gemini-test", prompt_cache_enabled=True
+    )
+
+    # Seed a cache manager entry that maps to the (now expired) cache name.
+    mgr = GeminiCacheManager(client=MagicMock())
+    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.monotonic(), ttl_seconds=3300)
+    llm._cache_manager = mgr
+
+    captured = []
+
+    def _gen(*, model, contents, config):
+        captured.append(config)
+        if len(captured) == 1:
+            # First (cached) attempt — the cache expired server-side.
+            raise genai_errors.ClientError(
+                403,
+                {
+                    "error": {
+                        "code": 403,
+                        "status": "PERMISSION_DENIED",
+                        "message": "CachedContent not found (or permission denied)",
+                    }
+                },
+            )
+        # Retry without the cache succeeds.
+        return SimpleNamespace(
+            text="extracted",
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=10, candidates_token_count=2, cached_content_token_count=0, thoughts_token_count=0
+            ),
+            candidates=[SimpleNamespace(finish_reason="STOP")],
+        )
+
+    llm._client = MagicMock()
+    llm._client.aio = MagicMock()
+    llm._client.aio.models = MagicMock()
+    llm._client.aio.models.generate_content = AsyncMock(side_effect=_gen)
+
+    result = (
+        await llm.call(
+            messages=[{"role": "system", "content": "SYSTEM PREFIX"}, {"role": "user", "content": "doc"}],
+            cached_prefix="cachedContents/stale",
+            max_retries=2,
+            temperature=0.1,
+        )
+    ).content
+
+    # The request succeeded via the uncached retry.
+    assert result == "extracted"
+    assert len(captured) == 2
+    # First attempt referenced the cache; the retry inlined the prefix instead.
+    assert captured[0].cached_content == "cachedContents/stale"
+    assert captured[1].cached_content is None
+    assert captured[1].system_instruction == "SYSTEM PREFIX"
+    # The dead entry was invalidated so the next operation recreates it.
+    assert mgr._entries == {}
+
+
+@pytest.mark.asyncio
+async def test_call_with_tools_falls_back_to_uncached_when_cache_403s():
+    """Same stale-cache 403 recovery on the tool path: drop the cache, re-send
+    the prefix + tools inline with the FULL (non-delta) conversation, and
+    invalidate the entry so later operations recreate it."""
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from google.genai import errors as genai_errors
+
+    from hindsight_api.engine.providers.gemini_cache import GeminiCacheManager, _CacheEntry
+    from hindsight_api.engine.providers.gemini_llm import GeminiLLM
+
+    llm = GeminiLLM(
+        provider="gemini", api_key="not-real-key", base_url="", model="gemini-test", prompt_cache_enabled=True
+    )
+
+    mgr = GeminiCacheManager(client=MagicMock())
+    mgr._entries["fp"] = _CacheEntry(name="cachedContents/stale", created_at=time.monotonic(), ttl_seconds=3300)
+    llm._cache_manager = mgr
+
+    captured_configs = []
+    captured_contents = []
+
+    def _gen(*, model, contents, config):
+        captured_configs.append(config)
+        captured_contents.append(contents)
+        if len(captured_configs) == 1:
+            raise genai_errors.ClientError(
+                403,
+                {
+                    "error": {
+                        "code": 403,
+                        "status": "PERMISSION_DENIED",
+                        "message": "CachedContent not found (or permission denied)",
+                    }
+                },
+            )
+        return SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(parts=[SimpleNamespace(text="done", function_call=None)]),
+                    finish_reason="STOP",
+                )
+            ],
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=10, candidates_token_count=2, cached_content_token_count=0, thoughts_token_count=0
+            ),
+        )
+
+    llm._client = MagicMock()
+    llm._client.aio = MagicMock()
+    llm._client.aio.models = MagicMock()
+    llm._client.aio.models.generate_content = AsyncMock(side_effect=_gen)
+
+    result = await llm.call_with_tools(
+        messages=[
+            {"role": "system", "content": "SYSTEM PREFIX"},
+            {"role": "user", "content": "turn one"},
+            {"role": "assistant", "content": "reply one"},
+            {"role": "user", "content": "turn two"},
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "noop", "description": "n", "parameters": {"type": "object"}},
+            }
+        ],
+        cached_prefix="cachedContents/stale",
+        cached_prefix_message_count=3,
+        max_retries=2,
+        temperature=0.1,
+    )
+
+    assert result.content == "done"
+    assert len(captured_configs) == 2
+    # Cached attempt: cache name set, prefix + tools live in the cache, only the
+    # delta turn is sent as contents.
+    assert captured_configs[0].cached_content == "cachedContents/stale"
+    assert not captured_configs[0].tools
+    assert len(captured_contents[0]) == 1
+    # Uncached retry: prefix + tools re-sent inline over the full conversation.
+    assert captured_configs[1].cached_content is None
+    assert captured_configs[1].tools
+    assert captured_configs[1].system_instruction == "SYSTEM PREFIX"
+    assert len(captured_contents[1]) == 3
+    # The dead entry was invalidated so the next operation recreates it.
+    assert mgr._entries == {}
+
+
+@pytest.mark.asyncio
 async def test_create_cache_times_out_and_falls_back():
     """The create runs under the manager lock, so a hung caches.create would block
     every concurrent caller (e.g. all chunks of a retain batch). It must time out

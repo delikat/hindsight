@@ -154,3 +154,24 @@ async def test_call_503_does_not_force_dump(monkeypatch, caplog):
 
     assert "[LLM_4XX_DUMP]" not in caplog.text
     clear_config_cache()
+
+
+@pytest.mark.asyncio
+async def test_call_403_without_cache_fails_fast():
+    """A 403 with no cache in play is a genuine auth failure — one attempt, no
+    retries. (With a cache active a 403 means a stale CachedContent and is
+    retried uncached instead; see test_gemini_cache.py.)"""
+    provider = _make_gemini_provider()
+    generate = AsyncMock(side_effect=_api_error(403, status="PERMISSION_DENIED"))
+    provider._client.aio.models.generate_content = generate
+
+    with pytest.raises(genai_errors.APIError) as excinfo:
+        await provider.call(
+            messages=[{"role": "user", "content": "hi"}],
+            scope="consolidation",
+            max_retries=4,
+            initial_backoff=0.0,
+        )
+
+    assert excinfo.value.code == 403
+    assert generate.call_count == 1

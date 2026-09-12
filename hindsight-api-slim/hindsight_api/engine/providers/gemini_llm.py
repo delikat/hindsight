@@ -587,26 +587,30 @@ class GeminiLLM(LLMInterface):
                     raise
 
             except genai_errors.APIError as e:
-                # Fast fail on auth errors - these won't recover with retries
-                if e.code in (401, 403):
-                    logger.error(f"Gemini auth error (HTTP {e.code}), not retrying: {str(e)}")
-                    raise
-
                 # Cached-request safety net: a stale/invalid/expired CachedContent
-                # (or an incompatibility like cache + tool_config) surfaces as a 400.
+                # surfaces as a 400 (e.g. an incompatibility like cache +
+                # tool_config) or as a 403 PERMISSION_DENIED ("CachedContent not
+                # found (or permission denied)") once the cache lapses server-side.
                 # Retrying the same cached request can't recover, so on the first
                 # such failure drop the cache, invalidate it so later operations
                 # recreate it, and retry THIS call inline with the prefix inlined.
-                # Caching must never break a request. Handled before the 400
-                # fail-fast below so a recoverable cache-400 isn't mistaken for a
-                # deterministic rejection.
-                if cache_active and e.code == 400:
-                    logger.warning(f"Gemini cached call failed (400); retrying uncached. Reason: {str(e)}")
+                # Caching must never break a request. Runs before the auth
+                # fast-fail (a genuine credential 403 just fails again on the
+                # uncached retry and exits through that path) and before the 400
+                # fail-fast (so a recoverable cache-400 isn't mistaken for a
+                # deterministic rejection).
+                if cache_active and e.code in (400, 403):
+                    logger.warning(f"Gemini cached call failed ({e.code}); retrying uncached. Reason: {str(e)}")
                     if self._cache_manager is not None and cached_prefix is not None:
                         self._cache_manager.invalidate(cached_prefix)
                     cache_active = False
                     generation_config = _build_generation_config(cache_active)
                     continue
+
+                # Fast fail on auth errors - these won't recover with retries
+                if e.code in (401, 403):
+                    logger.error(f"Gemini auth error (HTTP {e.code}), not retrying: {str(e)}")
+                    raise
 
                 # Diagnostic dump of the exact request behind any 4xx. Forced on for a
                 # non-recoverable 400 (see below) so its content-free structural profile
@@ -910,24 +914,25 @@ class GeminiLLM(LLMInterface):
                 )
 
             except genai_errors.APIError as e:
-                # Fast fail on auth errors
-                if e.code in (401, 403):
-                    logger.error(f"Gemini auth error (HTTP {e.code}), not retrying: {str(e)}")
-                    raise
-
-                # Cached-request safety net (see ``call``): a stale/invalid cache or
-                # a cache+tool_config conflict surfaces as a 400. Drop the cache,
-                # invalidate it for later operations, and retry THIS call inline
-                # with the prefix + tools re-sent. Caching must never break a call.
-                # Handled before the 400 fail-fast below so a recoverable cache-400
-                # isn't mistaken for a deterministic rejection.
-                if cache_active and e.code == 400:
-                    logger.warning(f"Gemini cached tool call failed (400); retrying uncached. Reason: {str(e)}")
+                # Cached-request safety net (see ``call``): a stale/expired cache
+                # surfaces as a 400 (cache+tool_config conflict) or a 403
+                # ("CachedContent not found"). Drop the cache, invalidate it for
+                # later operations, and retry THIS call inline with the prefix +
+                # tools re-sent. Caching must never break a call. Runs before the
+                # auth fast-fail (a genuine credential 403 fails again uncached
+                # and exits there) and before the 400 fail-fast below.
+                if cache_active and e.code in (400, 403):
+                    logger.warning(f"Gemini cached tool call failed ({e.code}); retrying uncached. Reason: {str(e)}")
                     if self._cache_manager is not None and cached_prefix is not None:
                         self._cache_manager.invalidate(cached_prefix)
                     cache_active = False
                     config = _build_tools_config(cache_active)
                     continue
+
+                # Fast fail on auth errors
+                if e.code in (401, 403):
+                    logger.error(f"Gemini auth error (HTTP {e.code}), not retrying: {str(e)}")
+                    raise
 
                 # Diagnostic dump of the exact request behind any 4xx. Forced on for a
                 # non-recoverable 400 so its content-free structural profile is always
