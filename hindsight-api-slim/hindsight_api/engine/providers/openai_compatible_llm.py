@@ -121,6 +121,25 @@ def _ensure_v1_base_url(base_url: str) -> str:
     return urlunparse(parsed._replace(path="/v1"))
 
 
+# An OpenAI reasoning-model family as a token of the id: gpt-N or an o-series name,
+# bounded by the ends of the id or a separator. Matching the family rather than a
+# list of names covers each new generation (gpt-6-luna) without a code change; the
+# boundaries keep a provider prefix (openai/gpt-6-luna), a fine-tune (ft:o4-mini-...)
+# or an Azure deployment name (prod-gpt-5-mini) matching, while gpt-4o and gpt-4.1 don't.
+# Replaced a substring check against ["gpt-5", "o1", "o3"], which never recognised
+# gpt-6 or o4, so they were sent temperature and no output-token floor.
+_OPENAI_REASONING_FAMILY = re.compile(r"(?<![a-z0-9])(?:gpt-(\d+)|o\d+)(?![a-z0-9])")
+
+
+def _is_openai_reasoning_model(model: str) -> bool:
+    """Whether ``model`` names an OpenAI reasoning model: gpt-5 and later, or the o-series."""
+    for match in _OPENAI_REASONING_FAMILY.finditer(model.lower()):
+        generation = match.group(1)
+        if generation is None or int(generation) >= 5:
+            return True
+    return False
+
+
 class ProviderResponseError(RuntimeError):
     """Raised when a provider returns a success response without usable content."""
 
@@ -1019,7 +1038,7 @@ class OpenAICompatibleLLM(LLMInterface):
         return any(x in model_lower for x in ["gpt-4o", "gpt-4.1", "gpt-4-", "gpt-3.5"])
 
     def _supports_reasoning_model(self) -> bool:
-        """Check if the current model is a reasoning model (o1, o3, GPT-5, DeepSeek).
+        """Check if the current model is a reasoning model (OpenAI gpt-5+/o-series, DeepSeek).
 
         **Deprecated as a capability check — this list is frozen. Do not add models to
         it.** Guessing capability from a name never worked outside OpenAI's own products:
@@ -1031,7 +1050,8 @@ class OpenAICompatibleLLM(LLMInterface):
 
         All that is left is the request *shape* a recognised OpenAI reasoning model
         requires regardless of effort: the max-completion-tokens floor, the parameter
-        name, temperature suppression.
+        name, temperature suppression. OpenAI's models are recognised by family
+        (``_is_openai_reasoning_model``), so a new generation needs no change here either.
         """
         model_lower = self.model.lower()
         if "deepseek" in model_lower:
@@ -1039,7 +1059,7 @@ class OpenAICompatibleLLM(LLMInterface):
             # DeepSeek model as a reasoning model injects reasoning_effort,
             # which conflicts with thinking-disabled flash calls.
             return any(x in model_lower for x in ["v4-pro", "reasoner", "r1", "thinking"])
-        return any(x in model_lower for x in ["gpt-5", "o1", "o3"])
+        return _is_openai_reasoning_model(self.model)
 
     def _get_max_reasoning_tokens(self) -> int | None:
         """Get max reasoning tokens for reasoning models."""

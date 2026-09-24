@@ -57,9 +57,11 @@ from hindsight_api.engine.providers.llm_debug import dump_request_on_4xx
 from hindsight_api.engine.providers.openai_compatible_headers import with_openai_compatible_user_agent
 
 # Provider-agnostic pure helpers (text cleanup, quota-defer parsing, json-mode
-# hint). These are module-level utilities, not chat/completions behavior.
+# hint, reasoning-model detection). These are module-level utilities, not
+# chat/completions behavior.
 from hindsight_api.engine.providers.openai_compatible_llm import (
     _ensure_json_word_in_user_message,
+    _is_openai_reasoning_model,
     _raise_provider_quota_defer,
     _strip_code_fences,
     _strip_reasoning_tags,
@@ -241,9 +243,8 @@ class OpenAIResponsesLLM(LLMInterface):
         )
 
     def _supports_reasoning_model(self) -> bool:
-        """Whether the model is an OpenAI reasoning model (gpt-5.x, o1, o3)."""
-        model_lower = self.model.lower()
-        return any(x in model_lower for x in ["gpt-5", "o1", "o3"])
+        """Whether the model is an OpenAI reasoning model (gpt-5 and later, o-series)."""
+        return _is_openai_reasoning_model(self.model)
 
     def supports_vision(self) -> bool:
         """OpenAI's own Responses API — every model it serves reads images."""
